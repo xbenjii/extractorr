@@ -1,12 +1,41 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/mholt/archiver/v4"
 )
+
+func OpenFile(path string) (*os.File, error) {
+	return os.Open(path)
+}
+
+func RetryOpenFileWithDelay(path string) (*os.File, error) {
+	file, err := OpenFile(path)
+	if err != nil {
+		ch := make(chan string, 1)
+		ctxTimeout, cancel := context.WithTimeout(context.Background(), time.Second*3)
+		defer cancel()
+		go func() {
+			ch <- "retry"
+		}()
+		select {
+		case <-ctxTimeout.Done():
+			return nil, err
+		case <-ch:
+			file, err = OpenFile(path)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return file, nil
+}
 
 func main() {
 	watcher, err := fsnotify.NewWatcher()
@@ -26,13 +55,38 @@ func main() {
 				log.Println("event:", event)
 				if event.Op&fsnotify.Write == fsnotify.Write {
 					log.Println("modified file:", event.Name)
-					input, err = os.Open(event.Name)
+
+					input, err := RetryOpenFileWithDelay(event.Name)
 					if err != nil {
-						return err
+						log.Fatal(err)
+						return
 					}
-					format, input, err := archiver.Identify(event.Name, input)
+
+					format, file, err := archiver.Identify(event.Name, input)
 					if err != nil {
-						return err
+						log.Fatal(err)
+						return
+					}
+
+					handler := func(ctx context.Context, f archiver.File) error {
+						log.Println("Extracting file:", f.Name())
+						// err := archiver.CopyFile(f, filepath.Join(os.Getenv("OUTPUT_DIR"), f.Name()))
+						// Move file to output dir
+						err := os.Rename(f.Name(), filepath.Join(os.Getenv("OUTPUT_DIR"), f.Name()))
+						if err != nil {
+							log.Fatal(err)
+							return err
+						}
+						return nil
+					}
+
+					if ex, ok := format.(archiver.Extractor); ok {
+						ctx := context.Background()
+						ex.Extract(ctx, file, nil, handler)
+						if err != nil {
+							log.Fatal(err)
+							return
+						}
 					}
 				}
 			case err, ok := <-watcher.Errors:
