@@ -2,17 +2,16 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/joho/godotenv"
 	"github.com/mholt/archiver/v4"
+	"github.com/sethvargo/go-retry"
 )
 
 /**
@@ -22,28 +21,6 @@ import (
  */
 func OpenFile(path string) (*os.File, error) {
 	return os.Open(path)
-}
-
-/**
- * Retry a function until it succeeds or the number of attempts is reached.
- * @param attempts the number of attempts to make
- * @param sleep the number of seconds to sleep between attempts
- * @param fn the function to call
- * @return the result of the function or an error
- */
-func retry[T any](attempts int, sleep int, fn func() (T, error)) (result T, err error) {
-	for i := 0; i < attempts; i++ {
-		if i > 0 {
-			log.Println("retrying after error:", err)
-			time.Sleep(time.Duration(sleep) * time.Second)
-			sleep *= 2
-		}
-		result, err = fn()
-		if err == nil {
-			return result, nil
-		}
-	}
-	return result, fmt.Errorf("after %d attempts, last error: %s", attempts, err)
 }
 
 func main() {
@@ -70,9 +47,14 @@ func main() {
 				if event.Op&fsnotify.Write == fsnotify.Write {
 					log.Println("modified file:", event.Name)
 
-					// TODO: Fix retry after success
-					input, err := retry(5, 5, func() (*os.File, error) {
-						return OpenFile(event.Name)
+					var input *os.File
+					ctx := context.Background()
+					err := retry.Exponential(ctx, 2, func(ctx context.Context) error {
+						// return OpenFile(event.Name)
+						if input, err = OpenFile(event.Name); err != nil {
+							return retry.RetryableError(err)
+						}
+						return nil
 					})
 
 					if err != nil {
